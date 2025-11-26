@@ -27,7 +27,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $searchMode = "remote"
 
 # Set the name of your primary branch (e.g., "master", "main")
-$mainBranchName = "master"
+$mainBranchName = "main"
 # --- END CONFIGURATION ---
 
 # Determine the full branch reference and search parameters based on the selected mode
@@ -102,7 +102,10 @@ foreach ($rawBranch in $mergedBranches) {
     try {
         # Get the commit hash of the tip of the branch, redirecting stderr to null
         $tipCommit = git rev-parse $branchForGit 2>$null
-        
+
+        # Get the author of the last commit in the branch
+        $author = git log -1 --format="%an" $branchForGit 2>$null
+
         # Find the merge commit in the main branch's history where the branch's tip is the second parent.
         # This is a reliable way to find the exact merge point.
         $mergeCommitHash = git rev-list --merges --parents $mainBranch | Where-Object { ($_ -split ' ')[2] -eq $tipCommit } | Select-Object -First 1 | ForEach-Object { ($_ -split ' ')[0] }
@@ -117,6 +120,7 @@ foreach ($rawBranch in $mergedBranches) {
                 MergeDate  = [datetime]$mergeDate
                 BranchName = $displayBranchName
                 CommitID   = $commitId
+                Author     = $author
             }
         }
         # Note: This script intentionally ignores fast-forwarded or squashed branches
@@ -126,8 +130,8 @@ foreach ($rawBranch in $mergedBranches) {
     }
 }
 
-# Sort the collected data by the merge date in descending order (newest first)
-$sortedData = $branchData | Sort-Object -Property MergeDate -Descending
+# Sort the collected data by author, then by merge date in descending order
+$sortedData = $branchData | Sort-Object -Property Author, @{Expression={$_.MergeDate}; Descending=$true}
 
 if ($sortedData.Count -eq 0) {
     Write-Host "No merged branches found that match the criteria."
@@ -136,17 +140,32 @@ if ($sortedData.Count -eq 0) {
 
 # Prepare the report for display and file output
 $reportHeader = "--- Branches Merged into '$mainBranch' (Mode: $searchMode) ---"
-$reportBody = $sortedData | Format-Table -Property @{Expression={$_.MergeDate.ToString('yyyy-MM-dd')}; Label="Merge Date"}, BranchName, CommitID | Out-String
-$reportFooter = "-----------------------------------------------------------"
 
 # Display the report in the console
 Write-Host "`n$reportHeader"
-Write-Host $reportBody
-Write-Host $reportFooter
 
-# Save the same report to a text file
+# Initialize the output file
 "Report for branches merged into '$mainBranch' (Mode: $searchMode) as of $(Get-Date)" | Set-Content -Path $outputFile
 "---" | Add-Content -Path $outputFile
-$reportBody | Add-Content -Path $outputFile
+
+# Group by author and display
+$groupedData = $sortedData | Group-Object -Property Author
+
+foreach ($authorGroup in $groupedData) {
+    $authorHeader = "`n=== Author: $($authorGroup.Name) ($($authorGroup.Count) branches) ==="
+
+    # Display to console
+    Write-Host $authorHeader -ForegroundColor Cyan
+    $authorGroup.Group | Format-Table -Property @{Expression={$_.MergeDate.ToString('yyyy-MM-dd')}; Label="Merge Date"}, BranchName, CommitID -AutoSize | Out-String | Write-Host
+
+    # Save to file
+    $authorHeader | Add-Content -Path $outputFile
+    $authorGroup.Group | Format-Table -Property @{Expression={$_.MergeDate.ToString('yyyy-MM-dd')}; Label="Merge Date"}, BranchName, CommitID -AutoSize | Out-String | Add-Content -Path $outputFile
+}
+
+$reportFooter = "`n-----------------------------------------------------------"
+Write-Host $reportFooter
+
+$reportFooter | Add-Content -Path $outputFile
 
 Write-Host "`nReport saved to '$outputFile'"
