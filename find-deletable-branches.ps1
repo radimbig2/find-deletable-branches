@@ -169,3 +169,146 @@ Write-Host $reportFooter
 $reportFooter | Add-Content -Path $outputFile
 
 Write-Host "`nReport saved to '$outputFile'"
+
+# --- INTERACTIVE DELETION MENU ---
+Write-Host "`n============================================" -ForegroundColor Green
+Write-Host "INTERACTIVE BRANCH DELETION" -ForegroundColor Green
+Write-Host "============================================" -ForegroundColor Green
+
+# Function to delete branches
+function Delete-Branches {
+    param (
+        [array]$branches,
+        [string]$deleteMode
+    )
+
+    $successCount = 0
+    $failCount = 0
+
+    foreach ($branch in $branches) {
+        $branchName = $branch.BranchName
+
+        try {
+            if ($deleteMode -eq "remote") {
+                Write-Host "Deleting remote branch: $branchName..." -ForegroundColor Yellow
+                git push origin --delete $branchName 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  ✓ Successfully deleted remote branch: $branchName" -ForegroundColor Green
+                    $successCount++
+                } else {
+                    Write-Host "  ✗ Failed to delete remote branch: $branchName" -ForegroundColor Red
+                    $failCount++
+                }
+            } elseif ($deleteMode -eq "local") {
+                Write-Host "Deleting local branch: $branchName..." -ForegroundColor Yellow
+                git branch -D $branchName 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  ✓ Successfully deleted local branch: $branchName" -ForegroundColor Green
+                    $successCount++
+                } else {
+                    Write-Host "  ✗ Failed to delete local branch: $branchName" -ForegroundColor Red
+                    $failCount++
+                }
+            } elseif ($deleteMode -eq "both") {
+                Write-Host "Deleting both local and remote branch: $branchName..." -ForegroundColor Yellow
+
+                # Delete local
+                git branch -D $branchName 2>&1 | Out-Null
+                $localSuccess = ($LASTEXITCODE -eq 0)
+
+                # Delete remote
+                git push origin --delete $branchName 2>&1 | Out-Null
+                $remoteSuccess = ($LASTEXITCODE -eq 0)
+
+                if ($localSuccess -or $remoteSuccess) {
+                    $msg = "  ✓ Deleted $branchName"
+                    if ($localSuccess -and $remoteSuccess) { $msg += " (local & remote)" }
+                    elseif ($localSuccess) { $msg += " (local only)" }
+                    else { $msg += " (remote only)" }
+                    Write-Host $msg -ForegroundColor Green
+                    $successCount++
+                } else {
+                    Write-Host "  ✗ Failed to delete both local and remote: $branchName" -ForegroundColor Red
+                    $failCount++
+                }
+            }
+        } catch {
+            Write-Host "  ✗ Error deleting $branchName : $_" -ForegroundColor Red
+            $failCount++
+        }
+    }
+
+    Write-Host "`n--- Deletion Summary ---" -ForegroundColor Cyan
+    Write-Host "Successfully deleted: $successCount" -ForegroundColor Green
+    Write-Host "Failed: $failCount" -ForegroundColor Red
+}
+
+# Show interactive menu
+while ($true) {
+    Write-Host "`n--- Select Author Group to Delete Branches ---" -ForegroundColor Cyan
+    Write-Host "Available authors:"
+
+    $authorIndex = 1
+    $authorList = @()
+
+    foreach ($authorGroup in $groupedData) {
+        $authorList += $authorGroup.Name
+        Write-Host "  [$authorIndex] $($authorGroup.Name) - $($authorGroup.Count) branches" -ForegroundColor White
+        $authorIndex++
+    }
+
+    Write-Host "  [0] Exit" -ForegroundColor Gray
+
+    $selection = Read-Host "`nEnter author number to view/delete branches"
+
+    if ($selection -eq "0" -or $selection -eq "") {
+        Write-Host "Exiting..." -ForegroundColor Yellow
+        break
+    }
+
+    $selectionNum = [int]$selection
+
+    if ($selectionNum -lt 1 -or $selectionNum -gt $authorList.Count) {
+        Write-Host "Invalid selection. Please try again." -ForegroundColor Red
+        continue
+    }
+
+    $selectedAuthor = $authorList[$selectionNum - 1]
+    $selectedGroup = $groupedData | Where-Object { $_.Name -eq $selectedAuthor }
+
+    Write-Host "`n=== Branches by $selectedAuthor ===" -ForegroundColor Cyan
+    $selectedGroup.Group | Format-Table -Property @{Expression={$_.MergeDate.ToString('yyyy-MM-dd')}; Label="Merge Date"}, BranchName, CommitID -AutoSize | Out-Host
+
+    Write-Host "`nDo you want to delete these $($selectedGroup.Count) branches?" -ForegroundColor Yellow
+    Write-Host "  [1] Delete from REMOTE only" -ForegroundColor White
+    Write-Host "  [2] Delete from LOCAL only" -ForegroundColor White
+    Write-Host "  [3] Delete from BOTH (local & remote)" -ForegroundColor White
+    Write-Host "  [0] Cancel" -ForegroundColor Gray
+
+    $deleteChoice = Read-Host "`nEnter your choice"
+
+    if ($deleteChoice -eq "0" -or $deleteChoice -eq "") {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        continue
+    }
+
+    $deleteMode = switch ($deleteChoice) {
+        "1" { "remote" }
+        "2" { "local" }
+        "3" { "both" }
+        default {
+            Write-Host "Invalid choice. Cancelled." -ForegroundColor Red
+            continue
+        }
+    }
+
+    Write-Host "`nFINAL CONFIRMATION: Delete $($selectedGroup.Count) branches ($deleteMode)?" -ForegroundColor Red
+    $confirm = Read-Host "Type 'YES' to confirm"
+
+    if ($confirm -eq "YES") {
+        Write-Host "`nStarting deletion..." -ForegroundColor Green
+        Delete-Branches -branches $selectedGroup.Group -deleteMode $deleteMode
+    } else {
+        Write-Host "Deletion cancelled." -ForegroundColor Yellow
+    }
+}
