@@ -1,0 +1,42 @@
+{
+  "name": "git-merged",
+  "version": "1.0.0",
+  "description": "Find Git branches that have been merged into production/main branch",
+  "main": "index.js",
+  "bin": {
+    "git-merged": "./git-merged.cmd"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "git",
+    "branches",
+    "merged",
+    "cleanup",
+    "git-tools",
+    "branch-management",
+    "devops",
+    "cli"
+  ],
+  "author": "Radimbig",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/radimbig2/find-deletable-branches.git"
+  },
+  "bugs": {
+    "url": "https://github.com/radimbig2/find-deletable-branches/issues"
+  },
+  "homepage": "https://github.com/radimbig2/find-deletable-branches#readme",
+  "engines": {
+    "node": ">=10.0.0"
+  },
+  "preferGlobal": true,
+  "files": [
+    "git-merged",
+    "git-merged.cmd",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+
+# git-merged - Find Git branches that have been merged into a specified branch
+# Usage: git-merged [branch-name] [options]
+
+set -e
+
+# Clear problematic Git environment variables that might be set by wrapper
+unset GIT_DIR
+unset GIT_WORK_TREE
+unset GIT_CEILING_DIRECTORIES
+
+# Default configuration
+MAIN_BRANCH="main"
+SEARCH_MODE="remote"
+OUTPUT_FILE="deletable_branches_report.txt"
+SAVE_TO_FILE=true
+
+# Color codes for output
+COLOR_CYAN='\033[0;36m'
+COLOR_RED='\033[0;31m'
+COLOR_YELLOW='\033[1;33m'
+COLOR_RESET='\033[0m'
+
+# Function to display help
+show_help() {
+    cat << EOF
+git-merged - Find Git branches that have been merged into production
+
+USAGE:
+    git-merged [branch-name] [options]
+
+ARGUMENTS:
+    branch-name         Target branch to check merges into (default: main)
+
+OPTIONS:
+    -l, --local         Search local branches (default: remote)
+    -r, --remote        Search remote branches
+    -n, --no-file       Don't save to file, only display in console
+    -o, --output PATH   Custom output file path
+    -h, --help          Show this help message
+
+EXAMPLES:
+    # Find remote branches merged into origin/main
+    git-merged
+
+    # Find branches merged into production
+    git-merged production
+
+    # Find local branches merged into develop
+    git-merged develop --local
+
+    # Display only, don't save to file
+    git-merged main --no-file
+
+    # Save to custom location
+    git-merged main --output ~/reports/merged-$(date +%Y%m%d).txt
+
+    # Combined options
+    git-merged production --local --output ./report.txt
+
+DESCRIPTION:
+    This tool lists all branches that have been merged into the specified
+    main branch. It displays the branch name, merge date, commit ID, and
+    author. Results are grouped by author and sorted by merge date.
+
+    The tool identifies branches through merge commits and excludes
+    fast-forwarded or squashed branches.
+
+REQUIREMENTS:
+    - Git must be installed and available in PATH
+    - Must be run from within a Git repository
+    - For remote mode, requires access to origin remote
+
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -l|--local)
+            SEARCH_MODE="local"
+            shift
+            ;;
+        -r|--remote)
+            SEARCH_MODE="remote"
+            shift
+            ;;
+        -n|--no-file)
+            SAVE_TO_FILE=false
+            shift
+            ;;
+        -o|--output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        -*)
+            echo -e "${COLOR_RED}Error: Unknown option $1${COLOR_RESET}" >&2
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+        *)
+            MAIN_BRANCH="$1"
+            shift
+            ;;
+    esac
+done
+
+# Check if we're in a git repository
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+    echo -e "${COLOR_RED}Error: This is not a Git repository.${COLOR_RESET}" >&2
+    exit 1
+fi
+
+# Configure search parameters based on mode
+if [[ "$SEARCH_MODE" == "remote" ]]; then
+    TARGET_BRANCH="origin/$MAIN_BRANCH"
+    BRANCH_LIST_CMD="git branch -r --merged $TARGET_BRANCH"
+    BRANCH_PREFIX="origin/"
+    SEARCH_DESCRIPTION="REMOTE branches (origin/*) merged into '$TARGET_BRANCH'"
+else
+    TARGET_BRANCH="$MAIN_BRANCH"
+    BRANCH_LIST_CMD="git branch --merged $TARGET_BRANCH"
+    BRANCH_PREFIX=""
+    SEARCH_DESCRIPTION="LOCAL branches merged into '$TARGET_BRANCH'"
+fi
+
+echo "Searching for $SEARCH_DESCRIPTION..."
+
+# Fetch latest data from remote to ensure merge statuses are up-to-date
+if [[ "$SEARCH_MODE" == "remote" ]]; then
+    git fetch --prune 2>/dev/null || true
+fi
+
+# Get all branches that have been merged
+MERGED_BRANCHES=$(eval "$BRANCH_LIST_CMD" 2>/dev/null | sed 's/^[ *]*//' || echo "")
+
+if [[ -z "$MERGED_BRANCHES" ]]; then
+    echo "No merged branches found that match the criteria."
+    exit 0
+fi
+
+# Temporary file to store branch data
+TEMP_DATA=$(mktemp)
+trap "rm -f $TEMP_DATA" EXIT
+
+# Process each merged branch
+while IFS= read -r raw_branch; do
+    # Skip the main branch itself and HEAD pointer
+    if [[ "$raw_branch" == "$TARGET_BRANCH" ]] || [[ "$raw_branch" == *"HEAD ->"* ]]; then
+        continue
+    fi
+
+    # Clean branch name for display
+    display_branch="${raw_branch#$BRANCH_PREFIX}"
+    
+    # Skip main branch after cleaning
+    if [[ "$display_branch" == "$MAIN_BRANCH" ]]; then
+        continue
+    fi
+
+    # Get commit hash of the branch tip
+    tip_commit=$(git rev-parse "$raw_branch" 2>/dev/null || echo "")
+    if [[ -z "$tip_commit" ]]; then
+        continue
+    fi
+
+    # Get author of the last commit
+    author=$(git log -1 --format="%an" "$raw_branch" 2>/dev/null || echo "Unknown")
+
+    # Find merge commit where this branch was merged
+    merge_commit=$(git rev-list --merges --parents "$TARGET_BRANCH" 2>/dev/null | \
+        awk -v tip="$tip_commit" '$3 == tip {print $1; exit}')
+
+    if [[ -n "$merge_commit" ]]; then
+        # Get merge date and short hash
+        merge_date=$(git show -s --format="%cI" "$merge_commit" 2>/dev/null)
+        commit_id=$(git show -s --format="%h" "$merge_commit" 2>/dev/null)
+        
+        # Store data: date|branch|commit|author
+        echo "${merge_date}|${display_branch}|${commit_id}|${author}" >> "$TEMP_DATA"
+    fi
+done <<< "$MERGED_BRANCHES"
+
+# Check if we found any data
+if [[ ! -s "$TEMP_DATA" ]]; then
+    echo "No merged branches found that match the criteria."
+    exit 0
+fi
+
+# Prepare output
+REPORT_HEADER="--- Branches Merged into '$TARGET_BRANCH' (Mode: $SEARCH_MODE) ---"
+REPORT_DATE="Report generated on $(date '+%Y-%m-%d %H:%M:%S')"
+
+# Function to format and display results
+display_results() {
+    echo ""
+    echo "$REPORT_HEADER"
+    echo "$REPORT_DATE"
+    echo ""
+
+    # Sort by author, then by date (descending)
+    sort -t'|' -k4,4 -k1,1r "$TEMP_DATA" | \
+    awk -F'|' '
+    BEGIN {
+        current_author = ""
+        count = 0
+    }
+    {
+        author = $4
+        if (author != current_author) {
+            if (current_author != "") {
+                printf "\n"
+            }
+            current_author = author
+            count = 0
+            for (i = 1; i <= NF; i++) {
+                if ($i == author) count++
+            }
+            printf "\033[0;36m=== Author: %s ===\033[0m\n", author
+            printf "%-12s  %-50s  %s\n", "Merge Date", "Branch Name", "Commit ID"
+            printf "%-12s  %-50s  %s\n", "----------", "------------------------------------", "---------"
+        }
+        
+        # Extract date (YYYY-MM-DD)
+        split($1, date_parts, "T")
+        merge_date = date_parts[1]
+        
+        printf "%-12s  %-50s  %s\n", merge_date, $2, $3
+    }
+    END {
+        printf "\n-----------------------------------------------------------\n"
+    }'
+}
+
+# Display results to console
+display_results
+
+# Save to file if requested
+if [[ "$SAVE_TO_FILE" == true ]]; then
+    # Create output directory if needed
+    OUTPUT_DIR=$(dirname "$OUTPUT_FILE")
+    if [[ ! -d "$OUTPUT_DIR" ]]; then
+        mkdir -p "$OUTPUT_DIR" 2>/dev/null || {
+            echo -e "${COLOR_YELLOW}Warning: Could not create directory $OUTPUT_DIR${COLOR_RESET}" >&2
+            echo "Results not saved to file."
+            exit 0
+        }
+    fi
+
+    # Save to file (without colors)
+    {
+        echo "$REPORT_HEADER"
+        echo "$REPORT_DATE"
+        echo ""
+        
+        sort -t'|' -k4,4 -k1,1r "$TEMP_DATA" | \
+        awk -F'|' '
+        BEGIN {
+            current_author = ""
+        }
+        {
+            author = $4
+            if (author != current_author) {
+                if (current_author != "") {
+                    printf "\n"
+                }
+                current_author = author
+                printf "=== Author: %s ===\n", author
+                printf "%-12s  %-50s  %s\n", "Merge Date", "Branch Name", "Commit ID"
+                printf "%-12s  %-50s  %s\n", "----------", "------------------------------------", "---------"
+            }
+            
+            split($1, date_parts, "T")
+            merge_date = date_parts[1]
+            
+            printf "%-12s  %-50s  %s\n", merge_date, $2, $3
+        }
+        END {
+            printf "\n-----------------------------------------------------------\n"
+        }'
+    } > "$OUTPUT_FILE"
+    
+    echo ""
+    echo "Report saved to '$OUTPUT_FILE'"
+fi
