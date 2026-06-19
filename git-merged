@@ -15,6 +15,10 @@ MAIN_BRANCH="main"
 SEARCH_MODE="remote"
 OUTPUT_FILE="deletable_branches_report.txt"
 SAVE_TO_FILE=true
+DELETE_REMOTE=false
+DELETE_LOCAL=false
+SKIP_CONFIRM=false
+AUTHOR_FILTER=""
 
 # Color codes for output
 COLOR_CYAN='\033[0;36m'
@@ -38,6 +42,10 @@ OPTIONS:
     -r, --remote        Search remote branches
     -n, --no-file       Don't save to file, only display in console
     -o, --output PATH   Custom output file path
+    --delete-remote     Delete found remote branches from origin
+    --delete-local      Delete found local branches
+    --skip-confirm      Delete without interactive confirmation
+    --author NAME       Only include branches whose last commit author matches NAME
     -h, --help          Show this help message
 
 EXAMPLES:
@@ -58,6 +66,12 @@ EXAMPLES:
 
     # Combined options
     git-merged production --local --output ./report.txt
+
+    # Delete merged remote branches by author, with confirmation
+    git-merged main --delete-remote --author radimbig
+
+    # Delete merged local and remote branches without confirmation
+    git-merged main --delete-local --delete-remote --skip-confirm
 
 DESCRIPTION:
     This tool lists all branches that have been merged into the specified
@@ -95,7 +109,31 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -o|--output)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                echo -e "${COLOR_RED}Error: --output requires a path.${COLOR_RESET}" >&2
+                exit 1
+            fi
             OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --delete-remote)
+            DELETE_REMOTE=true
+            shift
+            ;;
+        --delete-local)
+            DELETE_LOCAL=true
+            shift
+            ;;
+        --skip-confirm)
+            SKIP_CONFIRM=true
+            shift
+            ;;
+        --author)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                echo -e "${COLOR_RED}Error: --author requires a name.${COLOR_RESET}" >&2
+                exit 1
+            fi
+            AUTHOR_FILTER="$2"
             shift 2
             ;;
         -*)
@@ -110,81 +148,94 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$SKIP_CONFIRM" == true && "$DELETE_REMOTE" != true && "$DELETE_LOCAL" != true ]]; then
+    echo -e "${COLOR_YELLOW}Warning: --skip-confirm has no effect without --delete-remote or --delete-local.${COLOR_RESET}" >&2
+fi
+
 # Check if we're in a git repository
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     echo -e "${COLOR_RED}Error: This is not a Git repository.${COLOR_RESET}" >&2
     exit 1
 fi
 
-# Configure search parameters based on mode
-if [[ "$SEARCH_MODE" == "remote" ]]; then
-    TARGET_BRANCH="origin/$MAIN_BRANCH"
-    BRANCH_LIST_CMD="git branch -r --merged $TARGET_BRANCH"
-    BRANCH_PREFIX="origin/"
-    SEARCH_DESCRIPTION="REMOTE branches (origin/*) merged into '$TARGET_BRANCH'"
-else
-    TARGET_BRANCH="$MAIN_BRANCH"
-    BRANCH_LIST_CMD="git branch --merged $TARGET_BRANCH"
-    BRANCH_PREFIX=""
-    SEARCH_DESCRIPTION="LOCAL branches merged into '$TARGET_BRANCH'"
-fi
-
-echo "Searching for $SEARCH_DESCRIPTION..."
-
-# Fetch latest data from remote to ensure merge statuses are up-to-date
-if [[ "$SEARCH_MODE" == "remote" ]]; then
-    git fetch --prune 2>/dev/null || true
-fi
-
-# Get all branches that have been merged
-MERGED_BRANCHES=$(eval "$BRANCH_LIST_CMD" 2>/dev/null | sed 's/^[ *]*//' || echo "")
-
-if [[ -z "$MERGED_BRANCHES" ]]; then
-    echo "No merged branches found that match the criteria."
-    exit 0
-fi
-
 # Temporary file to store branch data
 TEMP_DATA=$(mktemp)
 trap "rm -f $TEMP_DATA" EXIT
 
-# Process each merged branch
-while IFS= read -r raw_branch; do
-    # Skip the main branch itself and HEAD pointer
-    if [[ "$raw_branch" == "$TARGET_BRANCH" ]] || [[ "$raw_branch" == *"HEAD ->"* ]]; then
-        continue
+collect_merged_branches() {
+    local mode="$1"
+    local target_branch branch_list_cmd branch_prefix search_description
+
+    if [[ "$mode" == "remote" ]]; then
+        target_branch="origin/$MAIN_BRANCH"
+        branch_list_cmd="git branch -r --merged $target_branch"
+        branch_prefix="origin/"
+        search_description="REMOTE branches (origin/*) merged into '$target_branch'"
+    else
+        target_branch="$MAIN_BRANCH"
+        branch_list_cmd="git branch --merged $target_branch"
+        branch_prefix=""
+        search_description="LOCAL branches merged into '$target_branch'"
     fi
 
-    # Clean branch name for display
-    display_branch="${raw_branch#$BRANCH_PREFIX}"
-    
-    # Skip main branch after cleaning
-    if [[ "$display_branch" == "$MAIN_BRANCH" ]]; then
-        continue
+    echo "Searching for $search_description..."
+
+    if [[ "$mode" == "remote" ]]; then
+        git fetch --prune 2>/dev/null || true
     fi
 
-    # Get commit hash of the branch tip
-    tip_commit=$(git rev-parse "$raw_branch" 2>/dev/null || echo "")
-    if [[ -z "$tip_commit" ]]; then
-        continue
+    local merged_branches
+    merged_branches=$(eval "$branch_list_cmd" 2>/dev/null | sed 's/^[ *]*//' || echo "")
+
+    if [[ -z "$merged_branches" ]]; then
+        return
     fi
 
-    # Get author of the last commit
-    author=$(git log -1 --format="%an" "$raw_branch" 2>/dev/null || echo "Unknown")
+    while IFS= read -r raw_branch; do
+        if [[ "$raw_branch" == "$target_branch" ]] || [[ "$raw_branch" == *"HEAD ->"* ]]; then
+            continue
+        fi
 
-    # Find merge commit where this branch was merged
-    merge_commit=$(git rev-list --merges --parents "$TARGET_BRANCH" 2>/dev/null | \
-        awk -v tip="$tip_commit" '$3 == tip {print $1; exit}')
+        local display_branch="${raw_branch#$branch_prefix}"
 
-    if [[ -n "$merge_commit" ]]; then
-        # Get merge date and short hash
-        merge_date=$(git show -s --format="%cI" "$merge_commit" 2>/dev/null)
-        commit_id=$(git show -s --format="%h" "$merge_commit" 2>/dev/null)
-        
-        # Store data: date|branch|commit|author
-        echo "${merge_date}|${display_branch}|${commit_id}|${author}" >> "$TEMP_DATA"
-    fi
-done <<< "$MERGED_BRANCHES"
+        if [[ "$display_branch" == "$MAIN_BRANCH" ]]; then
+            continue
+        fi
+
+        local tip_commit
+        tip_commit=$(git rev-parse "$raw_branch" 2>/dev/null || echo "")
+        if [[ -z "$tip_commit" ]]; then
+            continue
+        fi
+
+        local author
+        author=$(git log -1 --format="%an" "$raw_branch" 2>/dev/null || echo "Unknown")
+
+        if [[ -n "$AUTHOR_FILTER" ]] && [[ "$author" != *"$AUTHOR_FILTER"* ]]; then
+            continue
+        fi
+
+        local merge_commit
+        merge_commit=$(git rev-list --merges --parents "$target_branch" 2>/dev/null | \
+            awk -v tip="$tip_commit" '$3 == tip {print $1; exit}')
+
+        if [[ -n "$merge_commit" ]]; then
+            local merge_date commit_id
+            merge_date=$(git show -s --format="%cI" "$merge_commit" 2>/dev/null)
+            commit_id=$(git show -s --format="%h" "$merge_commit" 2>/dev/null)
+
+            # Store data: mode|target|date|branch|commit|author|raw_branch
+            echo "${mode}|${target_branch}|${merge_date}|${display_branch}|${commit_id}|${author}|${raw_branch}" >> "$TEMP_DATA"
+        fi
+    done <<< "$merged_branches"
+}
+
+if [[ "$DELETE_REMOTE" == true || "$DELETE_LOCAL" == true ]]; then
+    [[ "$DELETE_REMOTE" == true ]] && collect_merged_branches "remote"
+    [[ "$DELETE_LOCAL" == true ]] && collect_merged_branches "local"
+else
+    collect_merged_branches "$SEARCH_MODE"
+fi
 
 # Check if we found any data
 if [[ ! -s "$TEMP_DATA" ]]; then
@@ -193,7 +244,17 @@ if [[ ! -s "$TEMP_DATA" ]]; then
 fi
 
 # Prepare output
-REPORT_HEADER="--- Branches Merged into '$TARGET_BRANCH' (Mode: $SEARCH_MODE) ---"
+if [[ "$DELETE_REMOTE" == true && "$DELETE_LOCAL" == true ]]; then
+    REPORT_HEADER="--- Branches Merged into target branch '$MAIN_BRANCH' (Modes: remote, local) ---"
+elif [[ "$DELETE_REMOTE" == true ]]; then
+    REPORT_HEADER="--- Branches Merged into 'origin/$MAIN_BRANCH' (Mode: remote) ---"
+elif [[ "$DELETE_LOCAL" == true ]]; then
+    REPORT_HEADER="--- Branches Merged into '$MAIN_BRANCH' (Mode: local) ---"
+elif [[ "$SEARCH_MODE" == "remote" ]]; then
+    REPORT_HEADER="--- Branches Merged into 'origin/$MAIN_BRANCH' (Mode: remote) ---"
+else
+    REPORT_HEADER="--- Branches Merged into '$MAIN_BRANCH' (Mode: local) ---"
+fi
 REPORT_DATE="Report generated on $(date '+%Y-%m-%d %H:%M:%S')"
 
 # Function to format and display results
@@ -204,14 +265,14 @@ display_results() {
     echo ""
 
     # Sort by author, then by date (descending)
-    sort -t'|' -k4,4 -k1,1r "$TEMP_DATA" | \
+    sort -t'|' -k6,6 -k3,3r "$TEMP_DATA" | \
     awk -F'|' '
     BEGIN {
         current_author = ""
         count = 0
     }
     {
-        author = $4
+        author = $6
         if (author != current_author) {
             if (current_author != "") {
                 printf "\n"
@@ -227,10 +288,10 @@ display_results() {
         }
         
         # Extract date (YYYY-MM-DD)
-        split($1, date_parts, "T")
+        split($3, date_parts, "T")
         merge_date = date_parts[1]
         
-        printf "%-12s  %-50s  %s\n", merge_date, $2, $3
+        printf "%-12s  %-50s  %s\n", merge_date, $4, $5
     }
     END {
         printf "\n-----------------------------------------------------------\n"
@@ -258,13 +319,13 @@ if [[ "$SAVE_TO_FILE" == true ]]; then
         echo "$REPORT_DATE"
         echo ""
         
-        sort -t'|' -k4,4 -k1,1r "$TEMP_DATA" | \
+        sort -t'|' -k6,6 -k3,3r "$TEMP_DATA" | \
         awk -F'|' '
         BEGIN {
             current_author = ""
         }
         {
-            author = $4
+            author = $6
             if (author != current_author) {
                 if (current_author != "") {
                     printf "\n"
@@ -275,10 +336,10 @@ if [[ "$SAVE_TO_FILE" == true ]]; then
                 printf "%-12s  %-50s  %s\n", "----------", "------------------------------------", "---------"
             }
             
-            split($1, date_parts, "T")
+            split($3, date_parts, "T")
             merge_date = date_parts[1]
             
-            printf "%-12s  %-50s  %s\n", merge_date, $2, $3
+            printf "%-12s  %-50s  %s\n", merge_date, $4, $5
         }
         END {
             printf "\n-----------------------------------------------------------\n"
@@ -287,4 +348,60 @@ if [[ "$SAVE_TO_FILE" == true ]]; then
     
     echo ""
     echo "Report saved to '$OUTPUT_FILE'"
+fi
+
+run_delete_commands() {
+    local commands_file
+    commands_file=$(mktemp)
+    local branches_file
+    branches_file=$(mktemp)
+    trap "rm -f $TEMP_DATA $commands_file $branches_file" EXIT
+
+    while IFS='|' read -r mode target_branch merge_date branch_name commit_id author raw_branch; do
+        local merge_day="${merge_date%%T*}"
+        if [[ "$merge_day" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]]; then
+            merge_day="${BASH_REMATCH[3]}.${BASH_REMATCH[2]}.${BASH_REMATCH[1]}"
+        fi
+
+        if [[ "$mode" == "remote" ]]; then
+            printf "%s merged %s into %s\n" "$branch_name" "$merge_day" "$target_branch" >> "$branches_file"
+            printf "git push origin --delete %q\n" "$branch_name" >> "$commands_file"
+        elif [[ "$mode" == "local" ]]; then
+            printf "%s merged %s into %s\n" "$branch_name" "$merge_day" "$target_branch" >> "$branches_file"
+            printf "git branch -d %q\n" "$branch_name" >> "$commands_file"
+        fi
+    done < "$TEMP_DATA"
+
+    if [[ ! -s "$commands_file" ]]; then
+        return
+    fi
+
+    if [[ "$SKIP_CONFIRM" != true ]]; then
+        echo ""
+        echo "confirm deleting:"
+        cat "$branches_file"
+        echo ""
+        echo "commands that will be executed"
+        cat "$commands_file"
+        echo ""
+        read -r -p "Proceed with deleting these branches? [y/N] " confirmation || confirmation=""
+        if [[ "$confirmation" != "y" && "$confirmation" != "Y" && "$confirmation" != "yes" && "$confirmation" != "YES" ]]; then
+            echo "Deletion cancelled."
+            return
+        fi
+    else
+        echo ""
+        echo "commands that will be executed"
+        cat "$commands_file"
+    fi
+
+    while IFS= read -r command_to_run; do
+        echo ""
+        echo "+ $command_to_run"
+        eval "$command_to_run"
+    done < "$commands_file"
+}
+
+if [[ "$DELETE_REMOTE" == true || "$DELETE_LOCAL" == true ]]; then
+    run_delete_commands
 fi

@@ -41,6 +41,10 @@ git-merged [branch-name] [options]
 - `-r, --remote` - Search remote branches (default)
 - `-n, --no-file` - Don't save to file, only display in console
 - `-o, --output PATH` - Custom output file path
+- `--delete-remote` - Delete found remote branches from `origin`
+- `--delete-local` - Delete found local branches
+- `--skip-confirm` - Delete without interactive confirmation
+- `--author NAME` - Only include branches whose last commit author contains `NAME`
 - `-h, --help` - Show help message
 
 ### Examples
@@ -68,6 +72,38 @@ git-merged main --output ~/reports/merged-branches.txt
 #### Combined options
 ```bash
 git-merged production --local --output ./report.txt
+```
+
+#### Delete merged remote branches
+```bash
+git-merged main --delete-remote
+```
+
+#### Delete merged local branches
+```bash
+git-merged main --delete-local
+```
+
+#### Delete both local and remote branches for one author
+```bash
+git-merged main --delete-remote --delete-local --author radimbig
+```
+
+#### Delete without confirmation
+```bash
+git-merged main --delete-remote --delete-local --skip-confirm
+```
+
+When deleting without `--skip-confirm`, the tool prints the branches and the exact commands that will be executed, then asks for confirmation:
+
+```text
+confirm deleting:
+branch1 merged 21.01.2025 into origin/main
+branch2 merged 22.05.2026 into main
+
+commands that will be executed
+git push origin --delete branch1
+git branch -d branch2
 ```
 
 ## Output
