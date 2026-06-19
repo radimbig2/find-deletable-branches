@@ -1,6 +1,6 @@
 {
   "name": "git-merged",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Find Git branches that have been merged into production/main branch",
   "main": "index.js",
   "bin": {
