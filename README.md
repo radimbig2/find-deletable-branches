@@ -45,6 +45,7 @@ git-merged [branch-name] [options]
 - `--delete-local` - Delete found local branches
 - `--skip-confirm` - Delete without interactive confirmation
 - `--author NAME` - Only include branches whose last commit author contains `NAME`
+- `--diff-check` - Also include branches with no merge commit (squashed, cherry-picked, rebased) whose merge into the target branch would change no files
 - `-h, --help` - Show help message
 
 ### Examples
@@ -82,6 +83,12 @@ git-merged main --delete-remote
 #### Delete merged local branches
 ```bash
 git-merged main --delete-local
+```
+
+#### Find branches whose content is already in main
+Branches merged with squash, cherry-pick or rebase have no merge commit, so they are not found by default. `--diff-check` does a trial merge of each branch into the target with `git merge-tree` (the work tree is not touched) and includes the branch if that merge would change no files. Such branches are marked `[diff]`, show the date of their last commit, and are deleted locally with `git branch -D`. Requires Git 2.38+.
+```bash
+git-merged main --local --diff-check --author radimbig
 ```
 
 #### Delete both local and remote branches for one author
@@ -148,7 +155,7 @@ The tool:
 ## Notes
 
 - The tool only identifies branches merged via explicit merge commits
-- Fast-forwarded or squashed branches are excluded (their "merge date" cannot be reliably determined)
+- Fast-forwarded or squashed branches are excluded (their "merge date" cannot be reliably determined) unless `--diff-check` is used
 - By default, results are saved to `deletable_branches_report.txt` in the current directory
 
 ## Development

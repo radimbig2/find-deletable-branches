@@ -19,6 +19,7 @@ DELETE_REMOTE=false
 DELETE_LOCAL=false
 SKIP_CONFIRM=false
 AUTHOR_FILTER=""
+DIFF_CHECK=false
 
 # Color codes for output
 COLOR_CYAN='\033[0;36m'
@@ -46,6 +47,9 @@ OPTIONS:
     --delete-local      Delete found local branches
     --skip-confirm      Delete without interactive confirmation
     --author NAME       Only include branches whose last commit author matches NAME
+    --diff-check        Also include branches without a merge commit (squashed,
+                        cherry-picked, rebased, fast-forwarded) whose merge into
+                        the target branch would change no files
     -h, --help          Show this help message
 
 EXAMPLES:
@@ -73,13 +77,19 @@ EXAMPLES:
     # Delete merged local and remote branches without confirmation
     git-merged main --delete-local --delete-remote --skip-confirm
 
+    # Also find squashed/cherry-picked branches that add nothing to main
+    git-merged main --local --diff-check --author radimbig
+
 DESCRIPTION:
     This tool lists all branches that have been merged into the specified
     main branch. It displays the branch name, merge date, commit ID, and
     author. Results are grouped by author and sorted by merge date.
 
     The tool identifies branches through merge commits and excludes
-    fast-forwarded or squashed branches.
+    fast-forwarded or squashed branches. With --diff-check it also includes
+    any branch whose content is already in the target branch: a trial merge
+    (git merge-tree, nothing is written to the work tree) changes no files.
+    Such branches are marked [diff] and show the date of their last commit.
 
 REQUIREMENTS:
     - Git must be installed and available in PATH
@@ -128,6 +138,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_CONFIRM=true
             shift
             ;;
+        --diff-check|--diffcheck|-diffcheck)
+            DIFF_CHECK=true
+            shift
+            ;;
         --author)
             if [[ -z "${2:-}" || "$2" == -* ]]; then
                 echo -e "${COLOR_RED}Error: --author requires a name.${COLOR_RESET}" >&2
@@ -158,6 +172,11 @@ if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 1
 fi
 
+if [[ "$DIFF_CHECK" == true ]] && ! git merge-tree --write-tree HEAD HEAD &>/dev/null; then
+    echo -e "${COLOR_RED}Error: --diff-check requires Git 2.38 or newer (git merge-tree --write-tree).${COLOR_RESET}" >&2
+    exit 1
+fi
+
 # Temporary file to store branch data
 TEMP_DATA=$(mktemp)
 trap "rm -f $TEMP_DATA" EXIT
@@ -169,11 +188,13 @@ collect_merged_branches() {
     if [[ "$mode" == "remote" ]]; then
         target_branch="origin/$MAIN_BRANCH"
         branch_list_cmd="git branch -r --merged $target_branch"
+        [[ "$DIFF_CHECK" == true ]] && branch_list_cmd="git branch -r"
         branch_prefix="origin/"
         search_description="REMOTE branches (origin/*) merged into '$target_branch'"
     else
         target_branch="$MAIN_BRANCH"
         branch_list_cmd="git branch --merged $target_branch"
+        [[ "$DIFF_CHECK" == true ]] && branch_list_cmd="git branch"
         branch_prefix=""
         search_description="LOCAL branches merged into '$target_branch'"
     fi
@@ -224,8 +245,18 @@ collect_merged_branches() {
             merge_date=$(git show -s --format="%cI" "$merge_commit" 2>/dev/null)
             commit_id=$(git show -s --format="%h" "$merge_commit" 2>/dev/null)
 
-            # Store data: mode|target|date|branch|commit|author|raw_branch
-            echo "${mode}|${target_branch}|${merge_date}|${display_branch}|${commit_id}|${author}|${raw_branch}" >> "$TEMP_DATA"
+            # Store data: mode|target|date|branch|commit|author|raw_branch|kind
+            echo "${mode}|${target_branch}|${merge_date}|${display_branch}|${commit_id}|${author}|${raw_branch}|merge" >> "$TEMP_DATA"
+        elif [[ "$DIFF_CHECK" == true ]]; then
+            # Trial merge without touching the work tree; a conflict means the branch has its own changes
+            local merged_tree
+            merged_tree=$(git merge-tree --write-tree "$target_branch" "$raw_branch" 2>/dev/null | head -n 1) || continue
+            if [[ -n "$merged_tree" ]] && git diff --quiet "$target_branch" "$merged_tree" 2>/dev/null; then
+                local tip_date tip_id
+                tip_date=$(git show -s --format="%cI" "$tip_commit" 2>/dev/null)
+                tip_id=$(git show -s --format="%h" "$tip_commit" 2>/dev/null)
+                echo "${mode}|${target_branch}|${tip_date}|${display_branch}|${tip_id}|${author}|${raw_branch}|diff" >> "$TEMP_DATA"
+            fi
         fi
     done <<< "$merged_branches"
 }
@@ -291,7 +322,7 @@ display_results() {
         split($3, date_parts, "T")
         merge_date = date_parts[1]
         
-        printf "%-12s  %-50s  %s\n", merge_date, $4, $5
+        printf "%-12s  %-50s  %s%s\n", merge_date, $4, $5, ($8 == "diff" ? "  [diff]" : "")
     }
     END {
         printf "\n-----------------------------------------------------------\n"
@@ -339,7 +370,7 @@ if [[ "$SAVE_TO_FILE" == true ]]; then
             split($3, date_parts, "T")
             merge_date = date_parts[1]
             
-            printf "%-12s  %-50s  %s\n", merge_date, $4, $5
+            printf "%-12s  %-50s  %s%s\n", merge_date, $4, $5, ($8 == "diff" ? "  [diff]" : "")
         }
         END {
             printf "\n-----------------------------------------------------------\n"
@@ -357,17 +388,24 @@ run_delete_commands() {
     branches_file=$(mktemp)
     trap "rm -f $TEMP_DATA $commands_file $branches_file" EXIT
 
-    while IFS='|' read -r mode target_branch merge_date branch_name commit_id author raw_branch; do
+    while IFS='|' read -r mode target_branch merge_date branch_name commit_id author raw_branch kind; do
         local merge_day="${merge_date%%T*}"
         if [[ "$merge_day" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]]; then
             merge_day="${BASH_REMATCH[3]}.${BASH_REMATCH[2]}.${BASH_REMATCH[1]}"
         fi
 
+        if [[ "$kind" == "diff" ]]; then
+            printf "%s has no changes vs %s (last commit %s)\n" "$branch_name" "$target_branch" "$merge_day" >> "$branches_file"
+        else
+            printf "%s merged %s into %s\n" "$branch_name" "$merge_day" "$target_branch" >> "$branches_file"
+        fi
+
         if [[ "$mode" == "remote" ]]; then
-            printf "%s merged %s into %s\n" "$branch_name" "$merge_day" "$target_branch" >> "$branches_file"
             printf "git push origin --delete %q\n" "$branch_name" >> "$commands_file"
+        elif [[ "$mode" == "local" && "$kind" == "diff" ]]; then
+            # Not an ancestor of the target, so -d would refuse; content is already in the target
+            printf "git branch -D %q\n" "$branch_name" >> "$commands_file"
         elif [[ "$mode" == "local" ]]; then
-            printf "%s merged %s into %s\n" "$branch_name" "$merge_day" "$target_branch" >> "$branches_file"
             printf "git branch -d %q\n" "$branch_name" >> "$commands_file"
         fi
     done < "$TEMP_DATA"
